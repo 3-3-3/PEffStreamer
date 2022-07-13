@@ -22,6 +22,7 @@ program simple_streamer
   type(mg_t)         :: mg   ! Multigrid option struct
   type(ref_info_t)   :: refine_info
 
+
   ! Indices of cell-centered variables
   integer :: i_elec     ! Electron density
   integer :: i_pion     ! Positive ion density
@@ -36,7 +37,7 @@ program simple_streamer
   integer :: f_fld  ! Electric field vector
 
   ! Simulation parameters
-  real(dp), parameter :: end_time      = 3e-9_dp
+  real(dp), parameter :: end_time      = 10e-9_dp
   real(dp), parameter :: dt_output     = 20e-11_dp
   real(dp), parameter :: dt_max        = 20e-11_dp
   integer, parameter  :: ref_per_steps = 2
@@ -53,9 +54,12 @@ program simple_streamer
   real(dp), parameter :: refine_min_dx = 1e-9_dp
 
   ! Settings for the initial conditions
-  real(dp), parameter :: init_density = 1e15_dp
-  real(dp), parameter :: init_y_min   = 0.8_dp * domain_length
-  real(dp), parameter :: init_y_max   = 0.9_dp * domain_length
+  real(dp), parameter :: current_density = 1e20_dp
+  real(dp), parameter :: y_min   = 0.8_dp * domain_length
+  real(dp), parameter :: y_max   = 0.9_dp * domain_length
+  real(dp), parameter :: x_min = 0.3_dp * domain_length
+  real(dp), parameter :: x_max = 0.7_dp * domain_length
+  real(dp), parameter :: init_density = 0
 
   ! Simulation variables
   real(dp) :: dt
@@ -105,26 +109,29 @@ program simple_streamer
   time    = 0 ! Simulation time (all times are in s)
 
   ! Set up the initial conditions
-  do
+  do i = 1, 4
+    call af_adjust_refinement(tree, &
+        init_refinement_routine, &
+        refine_info)
      ! For each box in tree, set the initial conditions
-     call af_loop_box(tree, set_initial_condition)
+     !call af_loop_box(tree, set_initial_condition)
 
      ! Compute electric field on the tree.
      ! First perform multigrid to get electric potential,
      ! then take numerical gradient to geld field.
-     call compute_fld(tree, .false.)
+     !call compute_fld(tree, .false.)
 
      ! Adjust the refinement of a tree using refine_routine (see below) for grid
      ! refinement.
      ! Routine af_adjust_refinement sets the bit af_bit_new_children for each box
      ! that is refined.  On input, the tree should be balanced. On output,
      ! the tree is still balanced, and its refinement is updated (with at most
-     call af_adjust_refinement(tree, &               ! tree
-          refinement_routine, & ! Refinement function
-          refine_info)          ! Information about refinement
+    ! call af_adjust_refinement(tree, &               ! tree
+          !refinement_routine, & ! Refinement function
+          !refine_info)          ! Information about refinement
 
      ! If no new boxes have been added or removed, exit the loop
-     if (refine_info%n_add == 0 .and. refine_info%n_rm == 0) exit
+     !if (refine_info%n_add == 0 .and. refine_info%n_rm == 0) exit
   end do
 
   call af_print_info(tree)
@@ -136,6 +143,7 @@ program simple_streamer
           get_min, & ! function
           dt_max, &  ! Initial value for the reduction
           dt)        ! Result of the reduction
+      print *, dt
 
      if (dt < 1e-14) then
         print *, "dt getting too small, instability?", dt
@@ -145,7 +153,7 @@ program simple_streamer
      ! Every dt_output, write output
      if (output_count * dt_output <= time) then
         output_count = output_count + 1
-        write(fname, "(A,I6.6)") "output/simple_streamer_", output_count
+        write(fname, "(A,I6.6)") "output/PEffStreamer_", output_count
 
         ! Write the cell centered data of a tree to a Silo file. Only the
         ! leaves of the tree are used
@@ -153,7 +161,7 @@ program simple_streamer
 
         call af_tree_sum_cc(tree, i_elec, sum_elec)
         call af_tree_sum_cc(tree, i_pion, sum_pion)
-        print *, "sum(pion-elec)/sum(pion)", (sum_pion - sum_elec)/sum_pion
+        !print *, "sum(pion-elec)/sum(pion)", (sum_pion - sum_elec)/sum_pion
      end if
 
      if (time > end_time) exit
@@ -181,7 +189,9 @@ program simple_streamer
         end do
 
         ! Take average of phi_old and phi (explicit trapezoidal rule)
+        !call af_loop_box(tree, electron_beam)
         call af_loop_box(tree, average_dens)
+
 
         ! Compute field with new density
         call compute_fld(tree, .true.)
@@ -208,6 +218,34 @@ program simple_streamer
   end do
 
 contains
+
+  subroutine init_refinement_routine(box, cell_flags)
+    type(box_t), intent(in) :: box
+    integer, intent(out)    :: cell_flags(box%n_cell, box%n_cell)
+    integer                 :: i, j, nc
+    real(dp)                :: xy(2)
+
+    nc = box%n_cell
+
+    do j=1, nc
+      do i = 1, nc
+        xy = af_r_cc(box, [i,j])
+
+        !if (xy(2) > y_min .and. xy(2) < y_max) then
+          !if (xy(1) > x_min .and. xy(1) < x_max) then
+            !print *, "Refine"
+            !cell_flags(i,j) = af_do_ref
+          !else
+            !print *, "Do not refine"
+            !cell_flags(i,j) = af_keep_ref
+        !  end if
+        !end if
+        cell_flags(i,j) = af_keep_ref
+      end do
+    end do
+  end subroutine init_refinement_routine
+
+
 
   !> This routine sets the refinement flag for boxes(id)
   subroutine refinement_routine(box, cell_flags)
@@ -257,10 +295,11 @@ contains
 
     do j = 0, nc+1
        do i = 0, nc+1
-          xy   = af_r_cc(box, [i,j])
+          xy  = af_r_cc(box, [i,j])
           vol = (box%dr(1) * box%dr(2))**1.5_dp
 
-          if (xy(2) > init_y_min .and. xy(2) < init_y_max) then
+          if (xy(2) > y_min .and. xy(2) < y_max) then
+            if (xy(1) > x_min .and. xy(1) < x_max) then
              ! Approximate Poisson distribution with normal distribution
              normal_rands = two_normals(vol * init_density, &
                   sqrt(vol * init_density))
@@ -268,6 +307,7 @@ contains
              box%cc(i, j, i_elec) = abs(normal_rands(1)) / vol
           else
              box%cc(i, j, i_elec) = 0
+           end if
           end if
        end do
     end do
@@ -324,13 +364,14 @@ contains
     end do
 
     ! Dielectric relaxation time
-    dt_drt = UC_eps0 / (UC_elem_charge * mobility * &
-         maxval(box%cc(1:nc, 1:nc, i_elec)) + epsilon(1.0_dp))
+    dt_drt = abs(UC_eps0 / (UC_elem_charge * mobility * &
+         maxval(box%cc(1:nc, 1:nc, i_elec)) + epsilon(1.0_dp)))
 
     ! Diffusion condition
     dt_dif = 0.25_dp * minval(box%dr)**2 / max(diffusion_c, epsilon(1.0_dp))
 
     max_dt = min(dt_cfl, dt_drt, dt_dif)
+    !print *, "cfl", dt_cfl, "drt", dt_drt, "dif", dt_dif
   end function max_dt
 
 
@@ -444,6 +485,7 @@ contains
     real(dp), intent(in)        :: dt(:)
     real(dp)                    :: inv_dr(2), src, sflux, fld
     real(dp)                    :: alpha
+    real(dp)                    :: beam_src
     integer                     :: i, j, nc
 
     nc                    = box%n_cell
@@ -453,6 +495,7 @@ contains
        do i = 1, nc
           fld   = box%cc(i,j, i_fld)
           alpha = get_alpha(fld)
+          beam_src = get_beam_src(box,i,j)
           src   = box%cc(i, j, i_elec) * mobility * abs(fld) * alpha
 
           sflux = inv_dr(1) * (box%fc(i, j, 1, f_elec) - &
@@ -460,12 +503,37 @@ contains
                inv_dr(2) * (box%fc(i, j, 2, f_elec) - &
                box%fc(i, j+1, 2, f_elec))
 
-          box%cc(i, j, i_elec) = box%cc(i, j, i_elec) + (src + sflux) * dt(1)
+          box%cc(i, j, i_elec) = box%cc(i, j, i_elec) + (beam_src + src + sflux) * dt(1)
           box%cc(i, j, i_pion) = box%cc(i, j, i_pion) + src * dt(1)
        end do
     end do
 
   end subroutine update_solution
+
+  !Return the source due to the electron beam
+  function get_beam_src(box,i,j) result(beam_src)
+    integer, intent(in)     :: i,j
+    type(box_t), intent(in) :: box
+    real(dp)                :: beam_src
+    real(dp)                :: xy(2), dr(2), vol, normal_rands(2)
+
+    xy = af_r_cc(box, [i,j])
+    dr = box%dr
+    vol = (dr(1) * dr(2))**1.5
+
+    !If the beam source is within the beam source region, add density there
+    !Randomize that density a bit to be more realistic
+    if (xy(2) > y_min .and. xy(2) < y_max) then
+      if (xy(1) > x_min .and. xy(1) < x_max) then
+        normal_rands = two_normals(vol * current_density, &
+           sqrt(vol * current_density))
+           ! Prevent negative numbers
+           beam_src = abs(normal_rands(1)) / vol
+         else
+           beam_src = 0
+         end if
+       end if
+  end function get_beam_src
 
   !> This fills ghost cells near physical boundaries for the potential
   subroutine sides_bc_pot(box, nb, iv, coords, bc_val, bc_type)
@@ -488,4 +556,31 @@ contains
     end select
   end subroutine sides_bc_pot
 
+
+
+  subroutine electron_beam(box)
+    type(box_t), intent(inout) :: box
+    integer                     :: i, j, nc
+    real(dp)                    :: xy(2), normal_rands(2), vol
+
+    nc = box%n_cell
+
+    do j = 0, nc+1
+       do i = 0, nc+1
+          xy  = af_r_cc(box, [i,j])
+          vol = (box%dr(1) * box%dr(2))**1.5_dp
+
+          if (xy(2) > y_min .and. xy(2) < y_max) then
+            if (xy(1) > x_min .and. xy(1) < x_max) then
+             ! Approximate Poisson distribution with normal distribution
+             normal_rands = two_normals(vol * current_density * dt * 1e9_dp, &
+                  sqrt(vol * current_density * dt * 1e9_dp))
+             ! Prevent negative numbers
+             box%cc(i, j, i_elec) = box%cc(i, j, i_elec) + abs(normal_rands(1)) / vol
+           end if
+          end if
+       end do
+    end do
+
+  end subroutine electron_beam
 end program simple_streamer
