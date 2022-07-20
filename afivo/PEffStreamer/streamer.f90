@@ -2,7 +2,7 @@
 !> \example simple_streamer.f90
 !>
 !> A simplified model for ionization waves and/or streamers in 2D
-program simple_streamer
+program streamer
 
   use m_af_types
   use m_af_core
@@ -20,6 +20,7 @@ program simple_streamer
   character(len=100) :: fname
   type(af_t)         :: tree ! This contains the full grid information
   type(mg_t)         :: mg   ! Multigrid option struct
+  type(mg_t)         :: ph_mg(3)
   type(ref_info_t)   :: refine_info
 
 
@@ -32,9 +33,26 @@ program simple_streamer
   integer :: i_fld      ! Electric field norm
   integer :: i_rhs      ! Source term Poisson
 
+  !Cell centered variables related to photoionization
+  integer :: i_ph_src !Photoionization source term
+  integer :: i_ph_dist !Distribution of photoionizing photons
+
+  integer :: i_psi_1 !Isotropic component of photon distribution function
+  integer :: i_psi_2 !For the jth wavelength group
+  integer :: i_psi_3 !j = 1, 2, 3
+
+  integer :: i_rhs_1 !Right hand variable for Eddington Approximation
+  integer :: i_rhs_2
+  integer :: i_rhs_3
+
+  integer :: i_tmp !Temporary variable
+
   ! Indices of face-centered variables **
   integer :: f_elec ! Electron flux
   integer :: f_fld  ! Electric field vector
+
+  integer :: psi_indices(3) !arrays to hold indices of psi for easy access in loops
+  integer :: rhs_indices(3) !same for rhs
 
   ! Simulation parameters
   real(dp), parameter :: end_time      = 10e-9_dp
@@ -44,30 +62,42 @@ program simple_streamer
   integer, parameter  :: box_size      = 8
 
   ! Physical parameters
-  real(dp), parameter :: applied_field = -0.8e7_dp
+  real(dp), parameter :: applied_field = -1e7_dp
   real(dp), parameter :: mobility      = 0.03_dp
   real(dp), parameter :: diffusion_c   = 0.2_dp
+
+  !photo-ionization parameters
+  real(dp), parameter :: ph_quenching = 1
+  real(dp), parameter :: ph_chi_min = 0.035 !/(torr*cm)
+  real(dp), parameter :: ph_chi_max = 2 !/(torr*cm)
+  real(dp), parameter :: I_0 = 3.5e22_dp !/(cm**3*s)
+  real(dp), parameter :: p_o2 = 150 !Partial pressure of oxygen; 150 at ATP
+  real(dp), parameter :: ui_ratio = 0.6 !Segur et. al. ss. 4.2.1
+  real(dp), parameter :: p = 760 !torr; atmospheric pressure
+  real(dp), parameter :: p_q = 30 !tore; see Segur. et. al. ss. 4.2.1
+  real(dp), parameter :: xi = 0.2 !photoionization efficiency
+  !Fit parameters
+  !Reported in A Bourdon et al 2007 Plasma Sources Sci. Technol 16 656
+  real(dp), parameter :: A(3) = (/ 0.0067_dp,0.0346_dp,0.3059_dp /)
+  real(dp), parameter :: lambda(3) = (/ 0.0447_dp,0.1121_dp,0.5994_dp /)
 
   ! Computational domain
   real(dp), parameter :: domain_length = 2e-3_dp
   real(dp), parameter :: refine_max_dx = 1e-3_dp
   real(dp), parameter :: refine_min_dx = 1e-9_dp
-
+  real(dp), parameter :: pi            = 3.14159265359
   ! Settings for the initial conditions
   real(dp), parameter :: current_density = 1e20_dp
   real(dp), parameter :: y_min   = 0.8_dp * domain_length
   real(dp), parameter :: y_max   = 0.9_dp * domain_length
   real(dp), parameter :: x_min = 0.3_dp * domain_length
   real(dp), parameter :: x_max = 0.7_dp * domain_length
-  real(dp), parameter :: init_density = 0
+  real(dp), parameter :: init_density = 1
 
   ! Simulation variables
   real(dp) :: dt
   real(dp) :: time
   integer  :: output_count
-
-  ! To test charge conservation
-  real(dp) :: sum_elec, sum_pion
 
   call af_add_cc_variable(tree, "elec", ix=i_elec, n_copies=2)
   i_elec_old = af_find_cc_variable(tree, "elec_2")
@@ -76,9 +106,28 @@ program simple_streamer
   call af_add_cc_variable(tree, "phi", ix=i_phi)
   call af_add_cc_variable(tree, "fld", ix=i_fld)
   call af_add_cc_variable(tree, "rhs", ix=i_rhs)
+  call af_add_cc_variable(tree, "ph_src", ix=i_ph_src)
+  call af_add_cc_variable(tree, "ph_dist", ix=i_ph_dist)
+  call af_add_cc_variable(tree, "psi_1", ix=i_psi_1)
+  call af_add_cc_variable(tree, "psi_2", ix=i_psi_2)
+  call af_add_cc_variable(tree, "psi_3", ix=i_psi_3)
+  call af_add_cc_variable(tree, "rhs_1", ix=i_rhs_1)
+  call af_add_cc_variable(tree, "rhs_2", ix=i_rhs_2)
+  call af_add_cc_variable(tree, "rhs_3", ix=i_rhs_3)
+  call af_add_cc_variable(tree, "tmp", ix=i_tmp)
 
   call af_add_fc_variable(tree, "f_elec", ix=f_elec)
   call af_add_fc_variable(tree, "f_fld", ix=f_fld)
+
+  !Initialize arrays for access to psi and rhs for each Eddington group
+
+  psi_indices(1) = i_psi_1
+  psi_indices(2) = i_psi_2
+  psi_indices(3) = i_psi_3
+
+  rhs_indices(1) = i_rhs_1
+  rhs_indices(2) = i_rhs_2
+  rhs_indices(3) = i_rhs_3
 
   ! Initialize the tree (which contains all the mesh information)
   call af_init(tree, & ! Tree to initialize
@@ -93,8 +142,35 @@ program simple_streamer
   mg%i_tmp        = i_fld
   mg%i_rhs        = i_rhs
 
+  !Set multigrid options for photoionization PDEs
+  ph_mg(1)%i_phi     = i_psi_1
+  ph_mg(1)%i_rhs     = i_rhs_1
+  ph_mg(1)%i_tmp     = i_tmp
+  ph_mg(1)%helmholtz_lambda = (3 * (lambda(1) * p_o2) ** 2)
+
+  ph_mg(2)%i_phi     = i_psi_2
+  ph_mg(2)%i_rhs     = i_rhs_2
+  ph_mg(2)%i_tmp     = i_tmp
+  ph_mg(2)%helmholtz_lambda = (3 * (lambda(2) * p_o2) ** 2)
+
+  ph_mg(3)%i_phi     = i_psi_3
+  ph_mg(3)%i_rhs     = i_rhs_3
+  ph_mg(3)%i_tmp     = i_tmp
+  ph_mg(3)%helmholtz_lambda = (3 * (lambda(3) * p_o2) ** 2)
+
   ! Routines to use for ...
   mg%sides_bc => sides_bc_pot ! Filling ghost cell on physical boundaries
+
+  !And for Helmholtz equations
+  do i=1, 3
+    if (i == 1) then
+      ph_mg(i)%sides_bc => sides_bc
+    else
+      ph_mg(i)%sides_bc => af_bc_dirichlet_zero
+    end if
+    print *, "Helmholtz initialization"
+    call mg_init(tree, ph_mg(i))
+  end do
 
   ! This routine always needs to be called when using multigrid
   call mg_init(tree, mg)
@@ -114,24 +190,24 @@ program simple_streamer
         init_refinement_routine, &
         refine_info)
      ! For each box in tree, set the initial conditions
-     !call af_loop_box(tree, set_initial_condition)
+     call af_loop_box(tree, set_initial_condition)
 
      ! Compute electric field on the tree.
      ! First perform multigrid to get electric potential,
      ! then take numerical gradient to geld field.
-     !call compute_fld(tree, .false.)
+     call compute_fld(tree, .false.)
 
      ! Adjust the refinement of a tree using refine_routine (see below) for grid
      ! refinement.
      ! Routine af_adjust_refinement sets the bit af_bit_new_children for each box
      ! that is refined.  On input, the tree should be balanced. On output,
      ! the tree is still balanced, and its refinement is updated (with at most
-    ! call af_adjust_refinement(tree, &               ! tree
-          !refinement_routine, & ! Refinement function
-          !refine_info)          ! Information about refinement
+     call af_adjust_refinement(tree, &               ! tree
+          refinement_routine, & ! Refinement function
+          refine_info)          ! Information about refinement
 
      ! If no new boxes have been added or removed, exit the loop
-     !if (refine_info%n_add == 0 .and. refine_info%n_rm == 0) exit
+     if (refine_info%n_add == 0 .and. refine_info%n_rm == 0) exit
   end do
 
   call af_print_info(tree)
@@ -143,7 +219,7 @@ program simple_streamer
           get_min, & ! function
           dt_max, &  ! Initial value for the reduction
           dt)        ! Result of the reduction
-      print *, dt
+      print *, "[*] Timestep", dt
 
      if (dt < 1e-14) then
         print *, "dt getting too small, instability?", dt
@@ -156,12 +232,9 @@ program simple_streamer
         write(fname, "(A,I6.6)") "output/PEffStreamer_", output_count
 
         ! Write the cell centered data of a tree to a Silo file. Only the
+
         ! leaves of the tree are used
         call af_write_silo(tree, fname, output_count, time)
-
-        call af_tree_sum_cc(tree, i_elec, sum_elec)
-        call af_tree_sum_cc(tree, i_pion, sum_pion)
-        !print *, "sum(pion-elec)/sum(pion)", (sum_pion - sum_elec)/sum_pion
      end if
 
      if (time > end_time) exit
@@ -180,12 +253,20 @@ program simple_streamer
            call af_loop_tree(tree, fluxes_koren, leaves_only=.true.)
            call af_consistent_fluxes(tree, [f_elec])
 
+
+           print *, "[*] Solving 3-Group Eddington for photoionization source term"
+           !Solve 3-Group Eddington to get photoionization source
+           call af_loop_box(tree, set_ph_dist)
+           call compute_ph_src(tree, .true.)
+
            ! Update the solution
            call af_loop_box_arg(tree, update_solution, [dt], &
                 leaves_only=.true.)
 
            ! Compute new field on first iteration
-           if (i == 1) call compute_fld(tree, .true.)
+           if (i == 1) then
+             call compute_fld(tree, .true.)
+           end if
         end do
 
         ! Take average of phi_old and phi (explicit trapezoidal rule)
@@ -483,7 +564,7 @@ contains
   subroutine update_solution(box, dt)
     type(box_t), intent(inout) :: box
     real(dp), intent(in)        :: dt(:)
-    real(dp)                    :: inv_dr(2), src, sflux, fld
+    real(dp)                    :: inv_dr(2), src, sflux, fld, ph_src
     real(dp)                    :: alpha
     real(dp)                    :: beam_src
     integer                     :: i, j, nc
@@ -497,14 +578,15 @@ contains
           alpha = get_alpha(fld)
           beam_src = get_beam_src(box,i,j)
           src   = box%cc(i, j, i_elec) * mobility * abs(fld) * alpha
+          ph_src = box%cc(i, j, i_ph_src)
 
           sflux = inv_dr(1) * (box%fc(i, j, 1, f_elec) - &
                box%fc(i+1, j, 1, f_elec)) + &
                inv_dr(2) * (box%fc(i, j, 2, f_elec) - &
                box%fc(i, j+1, 2, f_elec))
 
-          box%cc(i, j, i_elec) = box%cc(i, j, i_elec) + (beam_src + src + sflux) * dt(1)
-          box%cc(i, j, i_pion) = box%cc(i, j, i_pion) + src * dt(1)
+          box%cc(i, j, i_elec) = box%cc(i, j, i_elec) + (beam_src + src + sflux + ph_src) * dt(1)
+          box%cc(i, j, i_pion) = box%cc(i, j, i_pion) + (src + ph_src) * dt(1)
        end do
     end do
 
@@ -556,31 +638,118 @@ contains
     end select
   end subroutine sides_bc_pot
 
+  !Subroutines for photoionization
+  subroutine compute_ph_src(tree, have_guess)
+    type(af_t), intent(inout)   :: tree
+    logical, intent(in)         :: have_guess
+    real(dp), parameter         :: rhs_c = -3 * p_o2 / (xi * 2.99792458e8) !Constant on right hand side of Helmholtz equations; -3p_o2/c
+    integer                     :: lvl, i, j, k, id, nc
 
+    nc = tree%n_cell
 
-  subroutine electron_beam(box)
-    type(box_t), intent(inout) :: box
-    integer                     :: i, j, nc
-    real(dp)                    :: xy(2), normal_rands(2), vol
+    do j = 1, 3
+      !set the source term (rhs)
+      do lvl = 1, tree%highest_lvl
+        do i = 1, size(tree%lvls(lvl)%leaves)
+          id = tree%lvls(lvl)%leaves(i)
+            tree%boxes(id)%cc(:, :, rhs_indices(j)) = rhs_c * lambda(j) * (&
+                 tree%boxes(id)%cc(:, :, i_ph_dist))
+        end do
+      end do
+      !Perform an FMG cycle for each j=1,2,3
+      call mg_fas_fmg(tree, ph_mg(j), .false., have_guess)
+    end do
+
+    call af_loop_box(tree, ph_src_from_psi)
+  end subroutine compute_ph_src
+
+  subroutine ph_src_from_psi(box)
+    type(box_t), intent(inout)  :: box
+    integer                     :: nc, i, j, k
+    real(dp)                    :: s_ph
 
     nc = box%n_cell
 
-    do j = 0, nc+1
-       do i = 0, nc+1
-          xy  = af_r_cc(box, [i,j])
-          vol = (box%dr(1) * box%dr(2))**1.5_dp
+    do i = 1, nc
+      do j = 1, nc
+        s_ph = 0_dp
 
-          if (xy(2) > y_min .and. xy(2) < y_max) then
-            if (xy(1) > x_min .and. xy(1) < x_max) then
-             ! Approximate Poisson distribution with normal distribution
-             normal_rands = two_normals(vol * current_density * dt * 1e9_dp, &
-                  sqrt(vol * current_density * dt * 1e9_dp))
-             ! Prevent negative numbers
-             box%cc(i, j, i_elec) = box%cc(i, j, i_elec) + abs(normal_rands(1)) / vol
-           end if
-          end if
-       end do
+        !Update s_ph using equation (20) from Bourdon et al
+        do k = 1, 3
+          s_ph = s_ph + A(k) * p_o2 * 2.99792458e8 * box%cc(i, j, psi_indices(k))
+        end do
+
+        box%cc(i, j, i_ph_src) = s_ph
     end do
+  end do
+  end subroutine ph_src_from_psi
 
-  end subroutine electron_beam
-end program simple_streamer
+  !Set the boundary conditions for the smallest lambda
+  !Using the Zhelensky model
+  subroutine sides_bc(box, nb, iv, coords, bc_val, bc_type)
+    type(box_t), intent(in) :: box
+    integer, intent(in)     :: nb
+    integer, intent(in)     :: iv
+    real(dp), intent(in)    :: coords(2, box%n_cell)
+    real(dp), intent(out)   :: bc_val(box%n_cell)
+    integer, intent(out)    :: bc_type
+    integer                 :: nc, lvl, i, j, k, l, m, id
+    real(dp)                :: s_ph, xy_1(2), xy_2(2), R, vol, dr(2)
+
+    !Dirichlet boundary conditions
+    bc_type = af_bc_dirichlet
+
+
+    do j = 1, box%n_cell
+      xy_1(1) = coords(1, j)
+      xy_1(2) = coords(2, j)
+      s_ph = 0
+
+      do lvl = 1, tree%highest_lvl
+        do i = 1, size(tree%lvls(lvl)%leaves)
+          id = tree%lvls(lvl)%leaves(i)
+          nc = tree%boxes(id)%n_cell
+          !print *, "Level, i: ", lvl, i
+
+          !Solve for boundary conditions using Zheleznyak integral
+          do l = 1, nc
+            do m = 1, nc
+
+              xy_2 = af_r_cc(tree%boxes(id), [l, m])
+              R = sqrt((xy_2(1) - xy_1(1))**2 + (xy_2(2) - xy_1(2))**2)
+              !print *, R, xy_1
+              dr = tree%boxes(id)%dr
+              vol = (dr(1) * dr(2)) ** 1.5
+
+              s_ph = s_ph + tree%boxes(id)%cc(l, m, i_ph_dist) * vol * &
+                        f(R) / (4 * pi * R**2)
+            end do
+          end do
+
+        end do
+      end do
+
+      !print *, s_ph
+      bc_val(j) = s_ph / (p_o2 * A(1) * 2.99792458e8)
+    end do
+    !print *, bc_val
+  end subroutine sides_bc
+
+  subroutine set_ph_dist(box)
+    type(box_t), intent(inout) :: box
+    integer                    :: nc, i, j
+
+    nc = box%n_cell
+    do i = 1, nc
+      do j = 1, nc
+        box%cc(i, j, i_ph_dist) = p_q / (p + p_q) * ui_ratio * box%cc(i, j, i_elec)
+      end do
+    end do
+  end subroutine set_ph_dist
+
+  real(dp) function f(R)
+    real(dp), intent(in) :: R
+
+    f = (exp(-ph_chi_min * p_o2 * R) - exp(-ph_chi_max * p_o2 * R)) / (R * log(ph_chi_max / ph_chi_min))
+  end function f
+end program streamer

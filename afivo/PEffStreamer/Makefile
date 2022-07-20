@@ -7,7 +7,7 @@ include $(AF_DIR)/src/makerules.make
 
 .PHONY: all clean run run_2d run_3d
 
-PROG := photoionization
+PROG := streamer 
 
 all:	$(PROG)
 

@@ -53,7 +53,7 @@ program photoionization
   real(dp), parameter :: ph_chi_max = 2 !/(torr*cm)
   real(dp), parameter :: I_0 = 3.5e22_dp !/(cm**3*s)
   real(dp), parameter :: p_o2 = 150 !Partial pressure of oxygen; 150 at ATP
-  real(dp), parameter :: xi = 0.2 !photoionization efficiency
+  real(dp), parameter :: xi = 0.1 !photoionization efficiency
   !Fit parameters
   !Reported in A Bourdon et al 2007 Plasma Sources Sci. Technol 16 656
   real(dp), parameter :: A(3) = (/ 0.0067_dp,0.0346_dp,0.3059_dp /)
@@ -131,6 +131,7 @@ program photoionization
     end if
   end do
 
+  call af_loop_box(tree, set_ph_dist)
   call compute_ph_src(tree, .true.)
 
   !write to silo
@@ -211,7 +212,7 @@ contains
     real(dp)                   :: xy(2)
     integer                    :: i, j, nc
 
-    print *, "set photon distribution"
+    !print *, "set photon distribution"
     nc = box%n_cell
 
     do j=1, nc
@@ -237,13 +238,13 @@ contains
 
     !Dirichlet boundary conditions
     bc_type = af_bc_dirichlet
-    print *, "Setting boundary conditions"
+    !print *, "Setting boundary conditions"
 
 
     do j = 1, box%n_cell
       xy_1(1) = coords(1, j)
       xy_1(2) = coords(2, j)
-      print *, xy_1
+      !print *, xy_1
       s_ph = 0
 
       do lvl = 1, tree%highest_lvl
@@ -275,38 +276,6 @@ contains
     end do
     !print *, bc_val
   end subroutine sides_bc
-
-  subroutine test_sides_bc(box, nb, iv, coords, bc_val, bc_type)
-    type(box_t), intent(in) :: box
-    integer, intent(in)     :: nb
-    integer, intent(in)     :: iv
-    real(dp), intent(in)    :: coords(2, box%n_cell)
-    real(dp), intent(out)   :: bc_val(box%n_cell)
-    integer, intent(out)    :: bc_type
-    real(dp)                :: xy_1(2), xy_2(2), R
-    integer                 :: j
-
-
-    xy_2(1) = 1e-3
-    xy_2(2) = 2e-3
-
-    bc_type = af_bc_dirichlet
-
-    do j = 1, box%n_cell
-      xy_1(1) = coords(1, j)
-      xy_1(2) = coords(2, j)
-      R = ((xy_2(1) - xy_1(1))**2 + (xy_2(2) - xy_1(2))**2) * 1e5
-
-      bc_val = R
-
-
-    end do
-
-
-
-
-
-  end subroutine test_sides_bc
 
   real(dp) function f(R)
     real(dp), intent(in) :: R
