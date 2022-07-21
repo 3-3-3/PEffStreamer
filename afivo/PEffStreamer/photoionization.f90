@@ -88,7 +88,8 @@ program photoionization
   call af_init(tree, &
                box_size, &
                [domain_length, domain_length], &
-               [box_size, box_size])
+               [box_size, box_size], &
+               coord=af_cyl)
 
   !Set multigrid options
   mg(1)%i_phi     = i_psi_1
@@ -109,7 +110,7 @@ program photoionization
 
   do i=1, 3
     if (i == 1) then
-      mg(i)%sides_bc => sides_bc
+      mg(i)%sides_bc => af_bc_dirichlet_zero
     else
       mg(i)%sides_bc => af_bc_dirichlet_zero
     end if
@@ -219,7 +220,7 @@ contains
       do i=1, nc
         xy = af_r_cc(box, [i,j])
         !print *,  I_0 * exp(-((xy(1) - x_0)**2 + (xy(2) - y_0)**2) / sigma**2)
-        box%cc(i, j, i_ph_dist) = I_0 * exp(-((xy(1) - x_0)**2 + (xy(2) - y_0)**2) / sigma**2)
+        box%cc(i, j, i_ph_dist) = I_0 * exp(-((xy(1))**2 + (xy(2) - y_0)**2) / sigma**2)
       end do
     end do
   end subroutine set_ph_dist
