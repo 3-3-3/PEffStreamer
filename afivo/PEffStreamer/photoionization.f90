@@ -38,10 +38,6 @@ program photoionization
 
 
   ! Simulation parameters
-  real(dp), parameter :: end_time      = 10e-9_dp
-  real(dp), parameter :: dt_output     = 20e-11_dp
-  real(dp), parameter :: dt_max        = 20e-11_dp
-  integer, parameter  :: ref_per_steps = 2
   integer, parameter  :: box_size      = 8
   real(dp), parameter :: pi            = 3.14159265359
 
@@ -51,21 +47,23 @@ program photoionization
   real(dp), parameter :: ph_quenching = 1
   real(dp), parameter :: ph_chi_min = 0.035 !/(torr*cm)
   real(dp), parameter :: ph_chi_max = 2 !/(torr*cm)
-  real(dp), parameter :: I_0 = 3.5e22_dp !/(cm**3*s)
+  real(dp), parameter :: S_0 = 1.53e25_dp !/(cm**3*s)
   real(dp), parameter :: p_o2 = 150 !Partial pressure of oxygen; 150 at ATP
-  real(dp), parameter :: xi = 0.1 !photoionization efficiency
+  real(dp), parameter :: xi_nu_ratio = 0.06 !photoionization efficiency
+  real(dp), parameter :: p_q = 30
+  real(dp), parameter :: p = 760
   !Fit parameters
   !Reported in A Bourdon et al 2007 Plasma Sources Sci. Technol 16 656
-  real(dp), parameter :: A(3) = (/ 0.0067_dp,0.0346_dp,0.3059_dp /)
-  real(dp), parameter :: lambda(3) = (/ 0.0447_dp,0.1121_dp,0.5994_dp /)
+  real(dp), parameter :: A(3) = (/ 0.0067_dp, 0.0346_dp, 0.3059_dp /)
+  real(dp), parameter :: lambda(3) = (/ 6_dp, 16_dp, 89_dp /)
 
   ! Computational domain
   real(dp), parameter :: domain_length = 2e-3_dp
   real(dp), parameter :: refine_max_dx = 1e-3_dp
   real(dp), parameter :: refine_min_dx = 1e-9_dp
-  real(dp), parameter :: sigma         =  0.01 !cm
-  real(dp), parameter :: x_0           = 0.5 * domain_length
-  real(dp), parameter :: y_0           = 0.5 * domain_length
+  real(dp), parameter :: sigma         =  0.01e-2 !cm
+  real(dp), parameter :: r_0           = 0.5 * domain_length
+  real(dp), parameter :: z_0           = 0.5 * domain_length
 
   call af_add_cc_variable(tree, "ph_src", ix=i_ph_src)
   call af_add_cc_variable(tree, "ph_dist", ix=i_ph_dist)
@@ -95,17 +93,17 @@ program photoionization
   mg(1)%i_phi     = i_psi_1
   mg(1)%i_rhs     = i_rhs_1
   mg(1)%i_tmp     = i_tmp
-  mg(1)%helmholtz_lambda = (3 * (lambda(1) * p_o2) ** 2)
+  mg(1)%helmholtz_lambda = (3 * lambda(1) ** 2)
 
   mg(2)%i_phi     = i_psi_2
   mg(2)%i_rhs     = i_rhs_2
   mg(2)%i_tmp     = i_tmp
-  mg(2)%helmholtz_lambda = (3 * (lambda(2) * p_o2) ** 2)
+  mg(2)%helmholtz_lambda = (3 * lambda(2) ** 2)
 
   mg(3)%i_phi     = i_psi_3
   mg(3)%i_rhs     = i_rhs_3
   mg(3)%i_tmp     = i_tmp
-  mg(3)%helmholtz_lambda = (3 * (lambda(3) * p_o2) ** 2)
+  mg(3)%helmholtz_lambda = (3 * lambda(3) ** 2)
 
 
   do i=1, 3
@@ -146,13 +144,13 @@ contains
     type(box_t), intent(in) :: box
     integer, intent(out)    :: cell_flags(box%n_cell, box%n_cell)
     integer                 :: i, j, nc
-    real(dp)                :: xy(2), dr2, drhs
+    real(dp)                :: rz(2), dr2, drhs
 
     nc = box%n_cell
     dr2 = maxval(box%dr)**2
     do i=1, nc
       do j=1, nc
-        xy = af_r_cc(box, [i,j])
+        rz = af_r_cc(box, [i,j])
         drhs = dr2 * max(box%cc(i, j, i_rhs_1), box%cc(i, j, i_rhs_2), box%cc(i, j, i_rhs_3))
         if (abs(drhs) > 1e-4 .and. box%lvl<5) then
           cell_flags(i,j) = af_do_ref
@@ -166,7 +164,6 @@ contains
   subroutine compute_ph_src(tree, have_guess)
     type(af_t), intent(inout)   :: tree
     logical, intent(in)         :: have_guess
-    real(dp), parameter         :: rhs_c = -3 * p_o2 / (xi * 2.99792458e8) !Constant on right hand side of Helmholtz equations; -3p_o2/c
     integer                     :: lvl, i, j, k, id, nc
 
     nc = tree%n_cell
@@ -176,8 +173,8 @@ contains
       do lvl = 1, tree%highest_lvl
         do i = 1, size(tree%lvls(lvl)%leaves)
           id = tree%lvls(lvl)%leaves(i)
-            tree%boxes(id)%cc(:, :, rhs_indices(j)) = rhs_c * lambda(j) * (&
-                 tree%boxes(id)%cc(:, :, i_ph_dist))
+            tree%boxes(id)%cc(:, :, rhs_indices(j)) = -3 * lambda(j) * xi_nu_ratio * (p_q / (p_q + p)) * &
+              tree%boxes(id)%cc(:, :, i_ph_dist) / 2.99792458e8
         end do
       end do
       !Perform an FMG cycle for each j=1,2,3
@@ -193,6 +190,7 @@ contains
     real(dp)                    :: s_ph
 
     nc = box%n_cell
+    print *, nc
 
     do i = 1, nc
       do j = 1, nc
@@ -200,7 +198,7 @@ contains
 
         !Update s_ph using equation (20) from Bourdon et al
         do k = 1, 3
-          s_ph = s_ph + A(k) * p_o2 * 2.99792458e8 * box%cc(i, j, psi_indices(k))
+          s_ph = s_ph + A(k) * p_o2 * 2.99792458e8 * box%cc(i, j, psi_indices(k)) * 3.5e4
         end do
 
         box%cc(i, j, i_ph_src) = s_ph
@@ -210,7 +208,7 @@ contains
 
   subroutine set_ph_dist(box)
     type(box_t), intent(inout) :: box
-    real(dp)                   :: xy(2)
+    real(dp)                   :: rz(2)
     integer                    :: i, j, nc
 
     !print *, "set photon distribution"
@@ -218,9 +216,9 @@ contains
 
     do j=1, nc
       do i=1, nc
-        xy = af_r_cc(box, [i,j])
-        !print *,  I_0 * exp(-((xy(1) - x_0)**2 + (xy(2) - y_0)**2) / sigma**2)
-        box%cc(i, j, i_ph_dist) = I_0 * exp(-((xy(1))**2 + (xy(2) - y_0)**2) / sigma**2)
+        rz = af_r_cc(box, [i,j])
+        !print *,  I_0 * exp(-((rz(1) - r_0)**2 + (rz(2) - z_0)**2) / sigma**2)
+        box%cc(i, j, i_ph_dist) = S_0 * exp(-(rz(1)**2 + (rz(2) - z_0)**2) / sigma ** 2)
       end do
     end do
   end subroutine set_ph_dist
@@ -234,18 +232,18 @@ contains
     real(dp), intent(in)    :: coords(2, box%n_cell)
     real(dp), intent(out)   :: bc_val(box%n_cell)
     integer, intent(out)    :: bc_type
-    integer                 :: nc, lvl, i, j, k, l, m, id
-    real(dp)                :: s_ph, xy_1(2), xy_2(2), R, vol, dr(2)
+    integer                 :: nc, lvl, i, j, k, l, m, q, id
+    real(dp)                :: s_ph, rz_1(2), rz_2(2), R, vol, dr(2), theta, d_theta
 
     !Dirichlet boundary conditions
     bc_type = af_bc_dirichlet
     !print *, "Setting boundary conditions"
-
+    d_theta = pi / 100
 
     do j = 1, box%n_cell
-      xy_1(1) = coords(1, j)
-      xy_1(2) = coords(2, j)
-      !print *, xy_1
+      rz_1(1) = coords(1, j)
+      rz_1(2) = coords(2, j)
+      !print *, rz_1
       s_ph = 0
 
       do lvl = 1, tree%highest_lvl
@@ -258,14 +256,19 @@ contains
           do l = 1, nc
             do m = 1, nc
 
-              xy_2 = af_r_cc(tree%boxes(id), [l, m])
-              R = sqrt((xy_2(1) - xy_1(1))**2 + (xy_2(2) - xy_1(2))**2)
-              !print *, R, xy_1
-              dr = tree%boxes(id)%dr
-              vol = (dr(1) * dr(2)) ** 1.5
+              rz_2 = af_r_cc(tree%boxes(id), [l, m])
 
-              s_ph = s_ph + tree%boxes(id)%cc(l, m, i_ph_dist) * vol * &
-                        f(R) / (4 * pi * R**2)
+              do q = 0, 20
+                theta = pi * q / 10
+                R = sqrt(rz_1(1) ** 2 + rz_2(1) ** 2 + (rz_2(2) - rz_1(2)) ** 2 - &
+                    2 * rz_1(1) * rz_2(1) * cos(theta))
+                !print *, R, rz_1
+                dr = tree%boxes(id)%dr !dimensions of cells in box
+                vol = dr(1) * dr(2) * rz_2(1) * d_theta
+
+                s_ph = s_ph + tree%boxes(id)%cc(l, m, i_ph_dist) * vol * &
+                          f(R) / (4 * pi * R**2)
+              end do
             end do
           end do
 
@@ -275,7 +278,6 @@ contains
       !print *, s_ph
       bc_val(j) = s_ph / (p_o2 * A(1) * 2.99792458e8)
     end do
-    !print *, bc_val
   end subroutine sides_bc
 
   real(dp) function f(R)

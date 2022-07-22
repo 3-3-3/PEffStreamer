@@ -88,10 +88,10 @@ program streamer
   real(dp), parameter :: pi            = 3.14159265359
   ! Settings for the initial conditions
   real(dp), parameter :: current_density = 1e20_dp
-  real(dp), parameter :: y_min   = 0.8_dp * domain_length
-  real(dp), parameter :: y_max   = 0.9_dp * domain_length
-  real(dp), parameter :: x_min = 0.3_dp * domain_length
-  real(dp), parameter :: x_max = 0.7_dp * domain_length
+  real(dp), parameter :: z_min   = 0.4_dp * domain_length
+  real(dp), parameter :: z_max   = 0.6_dp * domain_length
+  real(dp), parameter :: r_min = 0
+  real(dp), parameter :: r_max = 0.1_dp * domain_length
   real(dp), parameter :: init_density = 1
 
   ! Simulation variables
@@ -134,8 +134,8 @@ program streamer
        box_size, &     ! A box contains box_size**DIM cells
        [domain_length, domain_length], &
        [box_size, box_size], &
-       periodic=[.true., .false.])
-
+       coord=af_cyl, &
+       periodic=[.false., .true.])
 
   ! Set the multigrid options. First define the variables to use
   mg%i_phi        = i_phi
@@ -304,16 +304,16 @@ contains
     type(box_t), intent(in) :: box
     integer, intent(out)    :: cell_flags(box%n_cell, box%n_cell)
     integer                 :: i, j, nc
-    real(dp)                :: xy(2)
+    real(dp)                :: rz(2)
 
     nc = box%n_cell
 
     do j=1, nc
       do i = 1, nc
-        xy = af_r_cc(box, [i,j])
+        rz = af_r_cc(box, [i,j])
 
-        !if (xy(2) > y_min .and. xy(2) < y_max) then
-          !if (xy(1) > x_min .and. xy(1) < x_max) then
+        !if (rz(2) > z_min .and. rz(2) < z_max) then
+          !if (rz(1) > r_min .and. rz(1) < r_max) then
             !print *, "Refine"
             !cell_flags(i,j) = af_do_ref
           !else
@@ -333,14 +333,14 @@ contains
     type(box_t), intent(in) :: box
     integer, intent(out)     :: cell_flags(box%n_cell, box%n_cell)
     integer                  :: i, j, nc
-    real(dp)                 :: dx, dens, fld, adx, xy(2)
+    real(dp)                 :: dx, dens, fld, adx, rz(2)
 
     nc = box%n_cell
     dx = maxval(box%dr)
 
     do j = 1, nc
        do i = 1, nc
-          xy   = af_r_cc(box, [i,j])
+          rz   = af_r_cc(box, [i,j])
           dens = box%cc(i, j, i_elec)
           fld = box%cc(i, j, i_fld)
           adx = get_alpha(fld) * dx
@@ -370,17 +370,17 @@ contains
   subroutine set_initial_condition(box)
     type(box_t), intent(inout) :: box
     integer                     :: i, j, nc
-    real(dp)                    :: xy(2), normal_rands(2), vol
+    real(dp)                    :: rz(2), normal_rands(2), vol
 
     nc = box%n_cell
 
     do j = 0, nc+1
        do i = 0, nc+1
-          xy  = af_r_cc(box, [i,j])
+          rz  = af_r_cc(box, [i,j])
           vol = (box%dr(1) * box%dr(2))**1.5_dp
 
-          if (xy(2) > y_min .and. xy(2) < y_max) then
-            if (xy(1) > x_min .and. xy(1) < x_max) then
+          if (rz(2) > z_min .and. rz(2) < z_max) then
+            if (rz(1) > r_min .and. rz(1) < r_max) then
              ! Approximate Poisson distribution with normal distribution
              normal_rands = two_normals(vol * init_density, &
                   sqrt(vol * init_density))
@@ -597,16 +597,16 @@ contains
     integer, intent(in)     :: i,j
     type(box_t), intent(in) :: box
     real(dp)                :: beam_src
-    real(dp)                :: xy(2), dr(2), vol, normal_rands(2)
+    real(dp)                :: rz(2), dr(2), vol, normal_rands(2)
 
-    xy = af_r_cc(box, [i,j])
+    rz = af_r_cc(box, [i,j])
     dr = box%dr
     vol = (dr(1) * dr(2))**1.5
 
     !If the beam source is within the beam source region, add density there
     !Randomize that density a bit to be more realistic
-    if (xy(2) > y_min .and. xy(2) < y_max) then
-      if (xy(1) > x_min .and. xy(1) < x_max) then
+    if (rz(2) > z_min .and. rz(2) < z_max) then
+      if (rz(1) > r_min .and. rz(1) < r_max) then
         normal_rands = two_normals(vol * current_density, &
            sqrt(vol * current_density))
            ! Prevent negative numbers
@@ -627,12 +627,12 @@ contains
     integer, intent(out)    :: bc_type
 
     select case (nb)
-    case (af_neighb_lowy)
+    case (af_neighb_lowx)
        bc_type = af_bc_neumann
-       bc_val  = applied_field
-    case (af_neighb_highy)
+       bc_val  = 0.0_dp
+    case (af_neighb_highx)
        bc_type = af_bc_dirichlet
-       bc_val = 0.0_dp
+       bc_val = applied_field
     case default
        stop "sides_bc_pot: unspecified boundary"
     end select
@@ -694,15 +694,15 @@ contains
     real(dp), intent(out)   :: bc_val(box%n_cell)
     integer, intent(out)    :: bc_type
     integer                 :: nc, lvl, i, j, k, l, m, id
-    real(dp)                :: s_ph, xy_1(2), xy_2(2), R, vol, dr(2)
+    real(dp)                :: s_ph, rz_1(2), rz_2(2), R, vol, dr(2)
 
     !Dirichlet boundary conditions
     bc_type = af_bc_dirichlet
 
 
     do j = 1, box%n_cell
-      xy_1(1) = coords(1, j)
-      xy_1(2) = coords(2, j)
+      rz_1(1) = coords(1, j)
+      rz_1(2) = coords(2, j)
       s_ph = 0
 
       do lvl = 1, tree%highest_lvl
@@ -715,9 +715,9 @@ contains
           do l = 1, nc
             do m = 1, nc
 
-              xy_2 = af_r_cc(tree%boxes(id), [l, m])
-              R = sqrt((xy_2(1) - xy_1(1))**2 + (xy_2(2) - xy_1(2))**2)
-              !print *, R, xy_1
+              rz_2 = af_r_cc(tree%boxes(id), [l, m])
+              R = sqrt((rz_2(1) - rz_1(1))**2 + (rz_2(2) - rz_1(2))**2)
+              !print *, R, rz_1
               dr = tree%boxes(id)%dr
               vol = (dr(1) * dr(2)) ** 1.5
 
